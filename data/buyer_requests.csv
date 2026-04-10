@@ -1,0 +1,22 @@
+buyer_id,buyer_name,buyer_type,location,requested_products,category_preferences,accepted_perishability,quantity_needed,max_quantity,needed_by_date,purchase_model,max_price_ratio,urgency_level,storage_capacity,notes
+B1,Goodwill,Resale Nonprofit,Boston MA,T-Shirts|Jeans|Hoodies,Apparel,Non-Perishable,80,200,2026-05-15,Donation,0.00,Medium,High,Looking for gently used everyday clothing for resale
+B1,Goodwill,Resale Nonprofit,Boston MA,Jackets|Sweaters|Gloves,Outerwear,Non-Perishable,50,150,2026-04-25,Donation,0.00,High,Medium,Seasonal demand for warmer clothing
+B1,Goodwill,Resale Nonprofit,Boston MA,Sneakers|Sandals,Footwear,Non-Perishable,40,120,2026-05-10,Donation,0.00,Medium,Medium,Footwear for all age groups
+B1,Goodwill,Resale Nonprofit,Boston MA,Backpacks|Belts|Hats,Accessories,Non-Perishable,35,100,2026-05-20,Donation,0.00,Low,Medium,Accessories to complement clothing inventory
+B1,Goodwill,Resale Nonprofit,Boston MA,Socks|T-Shirts,Apparel,Non-Perishable,90,250,2026-04-22,Donation,0.00,High,High,High turnover basics needed urgently
+
+B2,TooGoodToGo,Discount Reseller,Cambridge MA,Bread|Bagels,Bakery,Perishable,70,200,2026-04-12,Discounted Purchase,0.35,High,Medium,Same-day resale bundles
+B2,TooGoodToGo,Discount Reseller,Cambridge MA,Milk|Yogurt,Dairy,Perishable,60,180,2026-04-14,Discounted Purchase,0.40,High,Medium,Short shelf-life dairy items
+B2,TooGoodToGo,Discount Reseller,Cambridge MA,Apples|Bananas|Grapes,Produce,Perishable,80,220,2026-04-13,Discounted Purchase,0.30,High,Medium,High demand fresh fruit bundles
+B2,TooGoodToGo,Discount Reseller,Cambridge MA,Cheese|Butter,Dairy,Perishable,40,120,2026-04-18,Discounted Purchase,0.45,Medium,Medium,Can handle slightly longer shelf life
+B2,TooGoodToGo,Discount Reseller,Cambridge MA,Orange Juice|Almond Milk,Beverages,Perishable,50,150,2026-04-20,Discounted Purchase,0.35,Medium,Medium,Beverage bundles for resale
+B2,TooGoodToGo,Discount Reseller,Cambridge MA,Strawberries|Blueberries,Produce,Perishable,45,140,2026-04-13,Discounted Purchase,0.25,High,Low,Highly perishable items for quick resale
+B2,TooGoodToGo,Discount Reseller,Cambridge MA,Prepared Meals|Sandwiches,Prepared Food,Perishable,60,180,2026-04-11,Discounted Purchase,0.20,High,Low,Immediate resale required (same day)
+
+B3,Boston Community Pantry,Nonprofit,Boston MA,Rice|Pasta|Canned Soup,Pantry,Non-Perishable,150,400,2026-06-01,Donation,0.00,High,High,Staple pantry items for families
+B3,Boston Community Pantry,Nonprofit,Boston MA,Black Beans|Peanut Butter,Pantry,Non-Perishable,120,300,2026-05-20,Donation,0.00,High,High,Protein-rich non-perishables needed
+B3,Boston Community Pantry,Nonprofit,Boston MA,Granola Bars|Crackers,Snacks,Non-Perishable,100,250,2026-05-25,Donation,0.00,Medium,Medium,Snacks for children and families
+B3,Boston Community Pantry,Nonprofit,Boston MA,Carrots|Potatoes|Onions,Produce,Semi-Perishable,90,220,2026-04-25,Donation,0.00,Medium,High,Longer-lasting produce preferred
+B3,Boston Community Pantry,Nonprofit,Boston MA,Milk|Eggs,Dairy,Perishable,70,180,2026-04-16,Donation,0.00,High,Medium,Fresh essentials distributed quickly
+B3,Boston Community Pantry,Nonprofit,Boston MA,Bread|Bagels,Bakery,Perishable,85,200,2026-04-13,Donation,0.00,High,Medium,Daily distribution items
+B3,Boston Community Pantry,Nonprofit,Boston MA,Apples|Bananas,Produce,Perishable,95,240,2026-04-14,Donation,0.00,High,Medium,Fresh fruit for immediate distribution
