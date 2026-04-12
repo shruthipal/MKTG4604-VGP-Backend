@@ -32,10 +32,10 @@ from inventory.routes import router as inv_router
 from match.routes import router as match_router
 
 # ── Background tasks / warmup ─────────────────────────────────────────────────
-from buyer.embeddings import warmup as buyer_warmup
 from inventory.cleanup import run_cleanup_loop
 from inventory.embeddings import warmup as inv_warmup
 from match import cache as result_cache
+from match.vector import warmup as match_warmup
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -65,8 +65,8 @@ async def lifespan(app: FastAPI):
 
     # 2. Warm up ChromaDB + sentence-transformer (shared on-disk cache)
     loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, inv_warmup)   # inventory collection + model
-    await loop.run_in_executor(None, buyer_warmup)  # buyer_profiles collection
+    await loop.run_in_executor(None, inv_warmup)    # inventory collection + model
+    await loop.run_in_executor(None, match_warmup)  # match query collection
 
     # 3. Start background tasks
     cleanup_task = asyncio.create_task(run_cleanup_loop())

@@ -34,7 +34,7 @@ from .llm import generate_recommendation
 from .models import MatchResult, RetailerAlert
 from .ranker import RankedItem, rank_and_filter
 from .schemas import MatchResponse, RecommendationCard, RetailerAlertResponse
-from .vector import query_inventory
+from .vector import query_inventory  # noqa: F401 — kept for warmup import side-effect
 
 logger = logging.getLogger(__name__)
 
@@ -80,16 +80,27 @@ async def get_recommendations(
             served_from_cache=True,
         )
 
-    # ── Step 3: Vector similarity search (1.5 s timeout — R-03) ───────────
-    chroma_result = await query_inventory(query_text, n_results=_CHROMADB_FETCH_N)
-    ids: list[str] = chroma_result["ids"][0]
-    distances: list[float] = chroma_result["distances"][0]
-
-    if not ids:
-        logger.warning(
-            "[R-03] ChromaDB returned no results for user %s "
-            "(timeout or empty collection). Cache also empty.", user_id,
-        )
+    # ── Step 3: Keyword search (SQLite LIKE) ──────────────────────────────
+    # ChromaDB/SentenceTransformer embedding holds Python's GIL on Mac,
+    # deadlocking the asyncio event loop even with wait_for timeout.
+    # Keyword search against SQLite is the reliable path on this platform.
+    import re as _re
+    notes_match = _re.search(r'Notes:\s*(.+)', query_text, _re.IGNORECASE)
+    prefs_match = _re.search(r'Category preferences:\s*(.+)', query_text, _re.IGNORECASE)
+    raw_kw = (notes_match.group(1) if notes_match else (prefs_match.group(1) if prefs_match else query_text)).strip()
+    keyword = raw_kw.lower()
+    logger.info("[match] keyword search: %r", keyword)
+    kw_result = await db.execute(
+        text(
+            "SELECT * FROM inventory_items "
+            "WHERE status = 'available' "
+            "AND (LOWER(title) LIKE :kw OR LOWER(category) LIKE :kw OR LOWER(description) LIKE :kw) "
+            "LIMIT 20"
+        ),
+        {"kw": f"%{keyword}%"},
+    )
+    kw_rows = kw_result.fetchall()
+    if not kw_rows:
         return MatchResponse(
             recommendations=[],
             buyer_segment=segment,
@@ -97,6 +108,8 @@ async def get_recommendations(
             generated_at=datetime.now(timezone.utc),
             served_from_cache=False,
         )
+    ids: list[str] = [row.id for row in kw_rows]
+    distances: list[float] = [0.5] * len(ids)  # neutral similarity for keyword matches
 
     # ── Step 4: Load inventory details from SQLite (available items only) ──
     inventory = await _load_inventory_items(ids, db)

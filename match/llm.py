@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
 OLLAMA_MODEL = "llama3"
-LLM_TIMEOUT_SECONDS = 10.0
+LLM_TIMEOUT_SECONDS = 5.0
 
 # ── Segment prompt configs ─────────────────────────────────────────────────────
 

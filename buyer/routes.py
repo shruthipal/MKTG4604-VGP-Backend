@@ -23,7 +23,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.jwt_utils import require_buyer_role
 from .database import get_db
-from .embeddings import upsert_buyer
 from .models import BehaviorLog, BuyerProfile
 from .schemas import (
     BehaviorLogRequest,
@@ -78,23 +77,6 @@ async def onboarding(
     db.add(profile)
     await db.commit()
     await db.refresh(profile)
-
-    # Embed to ChromaDB (1.5 s timeout — R-03)
-    profile_data = {
-        "user_id": profile.user_id,
-        "segment": profile.segment,
-        "preferences": profile.preferences,
-        "budget_min": profile.budget_min,
-        "budget_max": profile.budget_max,
-        "notes": profile.notes,
-        "location": profile.location,
-    }
-    embedded = await upsert_buyer(profile.id, profile_data)
-    if embedded:
-        profile.embedded = True
-        profile.updated_at = datetime.now(timezone.utc)
-        await db.commit()
-        await db.refresh(profile)
 
     logger.info(
         "Buyer profile created: user=%s segment=%s embedded=%s",
@@ -164,23 +146,6 @@ async def update_profile(
     profile.updated_at = datetime.now(timezone.utc)
     await db.commit()
     await db.refresh(profile)
-
-    # Re-embed updated profile
-    profile_data = {
-        "user_id": profile.user_id,
-        "segment": profile.segment,
-        "preferences": profile.preferences,
-        "budget_min": profile.budget_min,
-        "budget_max": profile.budget_max,
-        "notes": profile.notes,
-        "location": profile.location,
-    }
-    embedded = await upsert_buyer(profile.id, profile_data)
-    if embedded:
-        profile.embedded = True
-        profile.updated_at = datetime.now(timezone.utc)
-        await db.commit()
-        await db.refresh(profile)
 
     return BuyerProfileResponse.model_validate(profile)
 

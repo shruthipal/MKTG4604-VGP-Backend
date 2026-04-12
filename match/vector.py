@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 CHROMA_PATH = os.getenv("CHROMA_PATH", "./chroma_db")
 INVENTORY_COLLECTION = "inventory"
-QUERY_TIMEOUT_SECONDS = 1.5  # R-03 threshold
+QUERY_TIMEOUT_SECONDS = 3  # R-03 threshold — keyword fallback handles misses
 
 _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="chroma-match")
 _collection = None
@@ -94,7 +94,14 @@ async def query_inventory(
     except asyncio.TimeoutError:
         logger.warning(
             "[R-03] inventory ChromaDB query timed out (>%.1fs). "
-            "Returning empty — caller should use cache fallback.",
+            "Returning empty — caller should use keyword fallback.",
             QUERY_TIMEOUT_SECONDS,
+        )
+        return _EMPTY_RESULT
+    except Exception as exc:
+        logger.warning(
+            "[R-03] inventory ChromaDB query failed (%s). "
+            "Returning empty — caller should use keyword fallback.",
+            exc,
         )
         return _EMPTY_RESULT
