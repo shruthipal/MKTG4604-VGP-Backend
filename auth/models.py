@@ -10,7 +10,6 @@ class User(Base):
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     email = Column(String, unique=True, nullable=False, index=True)
     hashed_password = Column(String, nullable=False)
-    # role: "buyer" | "retailer"
     role = Column(String, nullable=False)
     created_at = Column(
         DateTime(timezone=True),

@@ -1,20 +1,20 @@
 """
 Match pipeline routes.
 
-POST /match/recommendations  — buyer JWT (R-06: retailers blocked at dependency level)
-  Full pipeline:
-    1. Segment check     — load buyer profile + segment from DB via JWT sub
-    2. Cache check       — return immediately if R-03 cache hit
-    3. Vector search     — query inventory ChromaDB (1.5 s timeout, R-03)
-    4. Inventory load    — fetch item details from SQLite (available only)
-    5. R-04 check        — load segment rejection counts per retailer
-    6. Rank + filter     — composite score (similarity + price fit + qty + R-04)
-    7. R-01 reorder      — nonprofits: free/discounted items always first
-    8. LLM generation    — parallel Ollama llama3 calls (R-01 prompt enforcement)
-    9. Persist results   — store MatchResult rows + retailer alerts
-   10. Cache + return    — cache cards, return MatchResponse to buyer
+POST /match/recommendations  — buyer JWT; returns top-5 ranked, LLM-personalised cards
+  Pipeline:
+    1. Load buyer profile from DB
+    2. Build query text + check in-memory cache (5-min TTL)
+    3. Keyword search — SQLite LIKE on title, category, description
+    4. Load full inventory details (available items only)
+    5. Load same-segment rejection counts per retailer
+    6. Composite scoring + sort (similarity, price fit, quantity, rejection penalty)
+    7. Nonprofit reorder — free/discounted items always surfaced first
+    8. LLM personalisation — parallel Ollama llama3 calls with segment-aware prompts
+    9. Persist MatchResult rows + retailer alerts
+   10. Cache results + return MatchResponse
 
-GET  /match/alerts           — retailer JWT; R-02 compliant dashboard alerts
+GET  /match/alerts            — retailer JWT; dashboard alerts (no buyer data)
 PATCH /match/alerts/{id}/read — retailer JWT; mark alert as read
 """
 import asyncio
@@ -62,11 +62,11 @@ async def get_recommendations(
     t0 = time.monotonic()
     user_id: str = current_user["sub"]
 
-    # ── Step 1: Segment check — load buyer profile ─────────────────────────
+    # Step 1: Load buyer profile
     buyer = await _load_buyer_profile(user_id, db)
     segment: str = buyer["segment"]
 
-    # ── Step 2: Build query text + check R-03 cache ────────────────────────
+    # Step 2: Build query text + check cache
     query_text = _build_query_text(buyer)
     cached_cards = result_cache.get(user_id, query_text)
 
@@ -80,10 +80,7 @@ async def get_recommendations(
             served_from_cache=True,
         )
 
-    # ── Step 3: Keyword search (SQLite LIKE) ──────────────────────────────
-    # ChromaDB/SentenceTransformer embedding holds Python's GIL on Mac,
-    # deadlocking the asyncio event loop even with wait_for timeout.
-    # Keyword search against SQLite is the reliable path on this platform.
+    # Step 3: Keyword search (SQLite LIKE)
     import re as _re
     notes_match = _re.search(r'Notes:\s*(.+)', query_text, _re.IGNORECASE)
     prefs_match = _re.search(r'Category preferences:\s*(.+)', query_text, _re.IGNORECASE)
@@ -111,13 +108,13 @@ async def get_recommendations(
     ids: list[str] = [row.id for row in kw_rows]
     distances: list[float] = [0.5] * len(ids)  # neutral similarity for keyword matches
 
-    # ── Step 4: Load inventory details from SQLite (available items only) ──
+    # Step 4: Load inventory details
     inventory = await _load_inventory_items(ids, db)
 
-    # ── Step 5: R-04 — load same-segment rejection counts per retailer ─────
+    # Step 5: Load rejection counts
     rejection_counts = await _load_rejection_counts(segment, db)
 
-    # ── Step 6 + 7: Rank, filter, R-01 nonprofit reorder ──────────────────
+    # Steps 6 + 7: Rank, filter, nonprofit reorder
     ranked: list[RankedItem] = rank_and_filter(ids, distances, inventory, buyer, rejection_counts)
     top: list[RankedItem] = ranked[:_TOP_N]
 
@@ -130,13 +127,13 @@ async def get_recommendations(
             served_from_cache=False,
         )
 
-    # ── Step 8: LLM personalisation — parallel calls ──────────────────────
+    # Step 8: Generate recommendations
     rec_texts: list[str] = await asyncio.gather(*[
         generate_recommendation(r.item_data, segment, r.composite_score)
         for r in top
     ])
 
-    # ── Step 9a: Build recommendation cards ───────────────────────────────
+    # Step 9a: Build cards
     cards: list[RecommendationCard] = [
         RecommendationCard(
             item_id=r.item_id,
@@ -153,11 +150,11 @@ async def get_recommendations(
         for r, rec_text in zip(top, rec_texts)
     ]
 
-    # ── Step 9b: Persist match results + retailer alerts ──────────────────
+    # Step 9b: Persist results
     await _store_match_results(user_id, cards, db)
     await _create_retailer_alerts(cards, db)
 
-    # ── Step 10: Cache + return ────────────────────────────────────────────
+    # Step 10: Cache + return
     result_cache.set_result(user_id, query_text, cards)
 
     elapsed = time.monotonic() - t0
@@ -267,10 +264,7 @@ async def mark_alert_read(
 # ── Private helpers ────────────────────────────────────────────────────────────
 
 async def _load_buyer_profile(user_id: str, db: AsyncSession) -> dict:
-    """
-    Load buyer profile from buyer_profiles table (cross-module via raw SQL).
-    Raises 404 with onboarding hint if no profile exists.
-    """
+    """Returns the buyer profile dict, or raises 404 if no profile exists."""
     result = await db.execute(
         text("SELECT * FROM buyer_profiles WHERE user_id = :uid"),
         {"uid": user_id},
@@ -293,11 +287,7 @@ async def _load_buyer_profile(user_id: str, db: AsyncSession) -> dict:
 
 
 def _build_query_text(buyer: dict) -> str:
-    """
-    Construct the text used to query the inventory ChromaDB collection.
-    Mirrors the document format used when embedding inventory items so that
-    cosine similarity is meaningful across both collections.
-    """
+    """Build a structured text string from the buyer profile for keyword extraction."""
     prefs = buyer.get("preferences") or []
     if isinstance(prefs, str):
         prefs = json.loads(prefs)
@@ -318,10 +308,7 @@ async def _load_inventory_items(
     item_ids: list[str],
     db: AsyncSession,
 ) -> dict[str, dict]:
-    """
-    Fetch full item rows from inventory_items for the given IDs.
-    Filters to status = 'available' only — respects R-05 interim state.
-    """
+    """Fetch available inventory rows by ID. Returns {item_id: row_dict}."""
     if not item_ids:
         return {}
     placeholders = ", ".join(f":id{i}" for i in range(len(item_ids)))
@@ -340,11 +327,7 @@ async def _load_rejection_counts(
     segment: str,
     db: AsyncSession,
 ) -> dict[str, int]:
-    """
-    R-04: Count how many times buyers in `segment` have rejected items
-    from each retailer. Returns {retailer_id: count}.
-    Only retailers with count >= 3 will be penalised by the ranker.
-    """
+    """Returns {retailer_id: rejection_count} for the given segment."""
     try:
         result = await db.execute(
             text("""

@@ -1,18 +1,11 @@
 """
-Buyer routes — ALL endpoints require a valid buyer JWT (require_buyer_role).
+Buyer routes — all endpoints require a valid buyer JWT.
 
-R-02 enforcement at this layer:
-  1. require_buyer_role blocks retailers at the dependency level (HTTP 403).
-  2. Every response uses BuyerProfileResponse — a buyer-only schema.
-  3. No route in this file may return BuyerMatchSummary; that schema is reserved
-     for the match pipeline when it builds retailer-facing payloads.
-  4. Behavioral history (BehaviorLog) is never returned outside this module.
-
-POST  /buyer/onboarding         — create profile (409 if already exists)
-GET   /buyer/profile            — fetch own profile
-PUT   /buyer/profile            — update own profile (partial)
-POST  /buyer/behavior           — log a behavior event
-GET   /buyer/behavior           — fetch own behavior history (buyer-only)
+POST  /buyer/onboarding  — create profile (409 if profile already exists)
+GET   /buyer/profile     — fetch own profile
+PUT   /buyer/profile     — partial update
+POST  /buyer/behavior    — log a behavior event
+GET   /buyer/behavior    — fetch own behavior history
 """
 import logging
 from datetime import datetime, timezone
@@ -50,12 +43,7 @@ async def onboarding(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(require_buyer_role),
 ):
-    """
-    Creates a buyer profile and embeds it to ChromaDB.
-    HTTP 409 if a profile already exists for this account.
-    HTTP 400 for any missing or invalid required field.
-    R-02: response schema (BuyerProfileResponse) is buyer-only.
-    """
+    """HTTP 409 if a profile already exists. HTTP 400 for invalid fields."""
     existing = await db.execute(
         select(BuyerProfile).where(BuyerProfile.user_id == current_user["sub"])
     )
@@ -114,10 +102,7 @@ async def update_profile(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(require_buyer_role),
 ):
-    """
-    Partial update — only provided fields are changed.
-    Re-embeds the profile to ChromaDB if any field is modified.
-    """
+    """Partial update — only provided fields are changed."""
     profile = await _get_profile_or_404(current_user["sub"], db)
 
     updated = False
@@ -163,12 +148,6 @@ async def log_behavior(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(require_buyer_role),
 ):
-    """
-    R-02: Behavior history is buyer-private and platform-internal.
-    This endpoint is protected by require_buyer_role. The match pipeline
-    reads behavior_logs directly from the DB for re-ranking; it is never
-    surfaced to retailers.
-    """
     log = BehaviorLog(
         user_id=current_user["sub"],
         action=body.action.value,
@@ -190,7 +169,6 @@ async def get_behavior(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(require_buyer_role),
 ):
-    """R-02: History accessible only to the buyer themselves."""
     result = await db.execute(
         select(BehaviorLog)
         .where(BehaviorLog.user_id == current_user["sub"])

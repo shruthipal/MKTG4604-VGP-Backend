@@ -1,23 +1,13 @@
 """
-LLM personalization layer — Ollama llama3 at http://localhost:11434.
+LLM personalisation layer — Ollama llama3 at http://localhost:11434.
 
-R-01 enforcement (nonprofit framing):
-  The nonprofit prompt is structurally different from all others:
-    • Persona: nonprofit procurement advisor
-    • Framing: mission impact, resource stewardship, community benefit
-    • Hard block: the words "profit", "revenue", "ROI", "margin", "markup",
-      "financial return" are explicitly forbidden in the instructions.
-  This ensures the model cannot inadvertently use profit-margin language
-  for nonprofits regardless of the item description.
+Each buyer segment gets a distinct persona and framing:
+  nonprofit → mission impact, resource stewardship (profit/margin language forbidden)
+  reseller  → resale value, market demand, inventory turnover
+  smb       → operational efficiency, cost savings
+  consumer  → personal value, everyday utility
 
-Non-nonprofit prompts are segment-aware:
-  • reseller  → resale value, market demand, turnover
-  • smb       → operational efficiency, cost savings, business fit
-  • consumer  → personal value, everyday utility, quality
-
-Timeout: 10 s per call (Ollama on local hardware).
-Fallback: if Ollama is unavailable or times out, a deterministic template
-          is returned so the pipeline always completes.
+Falls back to a deterministic template if Ollama is unavailable or times out.
 """
 import logging
 from typing import Optional
@@ -102,10 +92,7 @@ def _build_prompt(item: dict, segment: str, composite_score: float) -> str:
 
 
 def _template_fallback(item: dict, segment: str) -> str:
-    """
-    Deterministic fallback used when Ollama is unreachable or times out.
-    R-01: nonprofit fallback uses mission framing, never profit language.
-    """
+    """Deterministic fallback used when Ollama is unreachable or times out."""
     title = item.get("title", "this item")
     category = item.get("category", "general")
     condition = item.get("condition", "used")
@@ -145,11 +132,7 @@ async def generate_recommendation(
     segment: str,
     composite_score: float,
 ) -> str:
-    """
-    Call Ollama llama3 to generate a segment-aware recommendation.
-    R-01: nonprofit prompt structurally forbids profit/margin language.
-    Falls back to template on timeout or connection error.
-    """
+    """Generate a segment-aware recommendation via Ollama, or fall back to template."""
     prompt = _build_prompt(item, segment, composite_score)
 
     try:

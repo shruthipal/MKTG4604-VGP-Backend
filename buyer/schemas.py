@@ -1,12 +1,8 @@
 """
-R-02 schema boundary
-─────────────────────────────────────────────────────────────────────────────
-BuyerProfileResponse  — full profile; ONLY returned on buyer-authenticated routes.
-BuyerMatchSummary     — the ONLY buyer-related object permitted in retailer-facing
-                        contexts. Contains no segment, no preferences, no history,
-                        no PII. Match pipeline must use this type exclusively when
-                        building retailer responses.
-─────────────────────────────────────────────────────────────────────────────
+Pydantic schemas for the buyer service.
+
+BuyerProfileResponse — full profile returned to authenticated buyers only.
+BuyerMatchSummary    — the only buyer-related object permitted in retailer responses.
 """
 from datetime import datetime
 from enum import Enum
@@ -103,10 +99,6 @@ class BehaviorLogRequest(BaseModel):
 # ── Response schemas ───────────────────────────────────────────────────────────
 
 class BuyerProfileResponse(BaseModel):
-    """
-    Full buyer profile — BUYER-ONLY. Must never be returned on a retailer route.
-    R-02: enforce with require_buyer_role on every route that returns this type.
-    """
     model_config = ConfigDict(from_attributes=True)
 
     id: str
@@ -134,19 +126,10 @@ class BehaviorLogResponse(BaseModel):
 
 
 class BuyerMatchSummary(BaseModel):
-    """
-    R-02 compliant summary — the ONLY buyer-related object that may be included
-    in retailer-facing API responses or dashboard payloads.
-
-    Structural guarantee: this schema has NO segment, NO preferences, NO budget,
-    NO behavioral history, NO email, NO location. Adding any of those fields here
-    is a R-02 violation.
-
-    buyer_id is an opaque internal platform ID — not the user's email or name.
-    """
-    buyer_id: str          # opaque platform ID only — no PII
-    match_score: float     # 0.0 – 1.0 cosine similarity
-    match_label: str       # "Strong" | "Good" | "Moderate"
+    """Opaque buyer summary for retailer-facing responses — no PII, no preferences."""
+    buyer_id: str
+    match_score: float
+    match_label: str  # "Strong" | "Good" | "Moderate"
 
     @staticmethod
     def label_from_score(score: float) -> str:

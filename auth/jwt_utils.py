@@ -1,10 +1,4 @@
-"""
-JWT creation, decoding, and role-enforcement dependencies.
-
-R-06: Retailer JWT role MUST block access to the buyer match pipeline.
-      Enforced via `require_buyer_role` — apply this dependency to every
-      match-pipeline route. It cannot be bypassed at the application layer.
-"""
+"""JWT creation, decoding, and role-enforcement FastAPI dependencies."""
 import os
 from datetime import datetime, timedelta, timezone
 
@@ -58,18 +52,11 @@ def get_current_user(
 
 
 def require_buyer_role(current_user: dict = Depends(get_current_user)) -> dict:
-    """
-    R-06 enforcement: Retailer JWT role blocks access to the buyer match pipeline
-    at the middleware/dependency layer. This dependency must be applied to all
-    match-pipeline and buyer-pipeline route handlers.
-    """
+    """Blocks non-buyer JWTs with HTTP 403."""
     if current_user.get("role") != "buyer":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=(
-                "[R-06] Access denied: retailer accounts cannot access "
-                "the buyer match pipeline."
-            ),
+            detail="Access denied: retailer accounts cannot access the buyer pipeline.",
         )
     return current_user
 

@@ -20,11 +20,6 @@ class ItemStatus(str, Enum):
 
 
 class InventoryUploadRequest(BaseModel):
-    """
-    All five spec fields are required. Pydantic raises HTTP 422 automatically
-    for missing keys; the app's exception handler converts those to HTTP 400.
-    """
-
     title: str
     category: str
     quantity: int
@@ -99,16 +94,16 @@ class InventoryResponse(BaseModel):
 
 class RowError(BaseModel):
     """Details of a single row that failed validation during bulk upload."""
-    row: int             # 1-indexed data row number (header not counted)
-    raw_data: dict       # normalized cell values as parsed from the file
-    errors: list[str]    # human-readable validation error messages
+    row: int
+    raw_data: dict
+    errors: list[str]
 
 
 class BulkUploadResponse(BaseModel):
     """Summary returned after processing a CSV or Excel bulk upload."""
     filename: str
-    total_rows: int           # data rows parsed (empty rows excluded)
-    successful: int           # rows stored to DB (ChromaDB embed may be pending)
-    failed: int               # rows that failed validation
-    uploaded_item_ids: list[str]  # IDs of successfully created InventoryItems
-    errors: list[RowError]    # one entry per failed row
+    total_rows: int
+    successful: int
+    failed: int
+    uploaded_item_ids: list[str]
+    errors: list[RowError]

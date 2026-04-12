@@ -1,14 +1,9 @@
 """
-R-02 schema boundary — match pipeline
-──────────────────────────────────────────────────────────────────────────────
-RecommendationCard    → returned to BUYER only (buyer-authenticated route).
-                        Contains item info + LLM rec text. No buyer data leaked back.
-RetailerAlertResponse → returned to RETAILER dashboard (retailer-authenticated route).
-                        Contains item info + match_score_label ONLY.
-                        Structurally cannot contain: buyer_id, segment, preferences,
-                        budget, behavioral history, or any other buyer attribute.
-MatchResponse         → wraps RecommendationCard list for buyer response.
-──────────────────────────────────────────────────────────────────────────────
+Pydantic schemas for the match pipeline.
+
+RecommendationCard    — buyer-facing match result with LLM recommendation text.
+RetailerAlertResponse — retailer-facing alert; contains no buyer data.
+MatchResponse         — wraps RecommendationCard list for the buyer response.
 """
 from datetime import datetime
 from typing import Optional
@@ -26,16 +21,16 @@ class RecommendationCard(BaseModel):
     price: float
     condition: str
     quantity: int
-    retailer_id: str        # item provenance — not buyer data
-    similarity_score: float  # cosine similarity (0–1)
-    composite_score: float   # weighted composite (0–1)
-    recommendation_text: str # segment-aware LLM output (R-01 enforced in prompt)
+    retailer_id: str
+    similarity_score: float
+    composite_score: float
+    recommendation_text: str
 
 
 class MatchResponse(BaseModel):
     """Top-5 recommendations returned to the buyer after the full pipeline."""
     recommendations: list[RecommendationCard]
-    buyer_segment: str   # echoed back to buyer — fine, it's their own data
+    buyer_segment: str
     total_found: int
     generated_at: datetime
     served_from_cache: bool
@@ -44,20 +39,13 @@ class MatchResponse(BaseModel):
 # ── Retailer-facing ────────────────────────────────────────────────────────────
 
 class RetailerAlertResponse(BaseModel):
-    """
-    R-02 compliant dashboard alert.
-
-    This is the ONLY match-pipeline object returned to retailers.
-    It contains NO buyer_id, NO segment, NO preferences, NO budget, NO history.
-    match_score_label is the only buyer-derived value — expressed as a category
-    (Strong / Good / Moderate), never as a raw score or buyer attribute.
-    """
+    """Retailer dashboard alert — contains no buyer data."""
     model_config = ConfigDict(from_attributes=True)
 
     id: str
     item_id: str
-    item_title: str          # retailer's own item — not buyer data
-    match_score_label: str   # "Strong" | "Good" | "Moderate"
-    match_count: int         # how many buyer matches hit this item
+    item_title: str
+    match_score_label: str  # "Strong" | "Good" | "Moderate"
+    match_count: int
     is_read: bool
     created_at: datetime

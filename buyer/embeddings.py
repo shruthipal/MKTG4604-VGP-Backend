@@ -1,14 +1,8 @@
 """
 ChromaDB embedding layer for buyer profiles.
 
-Collection: buyer_profiles  (separate from the 'inventory' collection)
-Model:      all-MiniLM-L6-v2 (same model, shared on-disk cache)
-
-R-02 notice:
-  - Metadata stored in ChromaDB (user_id, segment, budget) is PLATFORM-INTERNAL.
-  - The match pipeline may read this metadata for ranking (R-01 nonprofit priority,
-    R-04 rejection de-prioritization) but must NEVER forward it to retailers.
-  - query_buyers() is exported for the match pipeline's internal use only.
+Collection: buyer_profiles
+Model:      all-MiniLM-L6-v2 (shared on-disk cache with inventory collection)
 """
 import asyncio
 import logging
@@ -52,8 +46,6 @@ def warmup() -> None:
     logger.info("Buyer ChromaDB collection warm — model loaded.")
 
 
-# ── Document text builder ──────────────────────────────────────────────────────
-
 def _build_doc_text(d: dict) -> str:
     prefs = ", ".join(d.get("preferences") or [])
     parts = [
@@ -68,8 +60,6 @@ def _build_doc_text(d: dict) -> str:
     return "\n".join(parts)
 
 
-# ── Sync helpers ───────────────────────────────────────────────────────────────
-
 def _upsert_sync(profile_id: str, data: dict) -> None:
     col = _get_collection()
     col.upsert(
@@ -77,8 +67,6 @@ def _upsert_sync(profile_id: str, data: dict) -> None:
         documents=[_build_doc_text(data)],
         metadatas=[
             {
-                # R-02: this metadata is INTERNAL to the platform.
-                # Never forward these fields to retailer-facing responses.
                 "user_id": data.get("user_id", ""),
                 "segment": data.get("segment", ""),
                 "budget_min": float(data.get("budget_min", 0)),
@@ -99,8 +87,6 @@ def _query_sync(query_text: str, n_results: int, where: Optional[dict]) -> dict:
 def _delete_sync(profile_id: str) -> None:
     _get_collection().delete(ids=[profile_id])
 
-
-# ── Async public API ───────────────────────────────────────────────────────────
 
 async def upsert_buyer(profile_id: str, data: dict) -> bool:
     """
@@ -126,17 +112,7 @@ async def query_buyers(
     n_results: int = 10,
     where: Optional[dict] = None,
 ) -> dict:
-    """
-    Query the buyer_profiles collection by similarity to query_text.
-
-    For MATCH PIPELINE USE ONLY.
-
-    Returns raw ChromaDB result dict:
-      { "ids": [[...]], "distances": [[...]], "metadatas": [[...]] }
-
-    R-02 reminder: the caller (match pipeline) must strip segment / budget from
-    any dict that will be sent to a retailer. Use BuyerMatchSummary exclusively.
-    """
+    """Query the buyer_profiles collection by similarity to query_text."""
     loop = asyncio.get_event_loop()
     try:
         return await asyncio.wait_for(

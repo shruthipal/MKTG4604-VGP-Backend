@@ -1,12 +1,9 @@
 """
-R-05: Sold or expired inventory must be de-indexed from the vector DB within 24 hours.
+Background cleanup loop — runs hourly to de-index sold or expired inventory from ChromaDB.
 
-Strategy: an asyncio background task runs every hour. It queries SQLite for any item
-where (status IN ('sold','expired') OR expiry_date <= now()) AND embedded = True,
-removes those IDs from ChromaDB, then marks embedded=False in SQLite.
-
-Running hourly guarantees a worst-case lag of ~1 hour — well within the 24-hour limit.
-Immediate de-indexing also fires inline on the PATCH /{id}/status route for sold items.
+Queries SQLite for items where (status in ('sold','expired') OR expiry_date <= now)
+AND embedded=True, removes them from ChromaDB, and marks embedded=False in SQLite.
+Immediate de-indexing also fires inline on PATCH /{id}/status for sold items.
 """
 import asyncio
 import logging
@@ -40,7 +37,7 @@ async def _run_deindex_pass() -> None:
         stale = result.scalars().all()
 
         if not stale:
-            logger.debug("[R-05] Cleanup pass: no stale items found.")
+            logger.debug("Cleanup pass: no stale items found.")
             return
 
         ids = [item.id for item in stale]
@@ -53,18 +50,15 @@ async def _run_deindex_pass() -> None:
                 item.status = "expired"
 
         await db.commit()
-        logger.info("[R-05] Cleanup pass de-indexed %d item(s).", len(ids))
+        logger.info("Cleanup pass de-indexed %d item(s).", len(ids))
 
 
 async def run_cleanup_loop() -> None:
-    """
-    Long-running async background task. Start this with asyncio.create_task()
-    inside the FastAPI lifespan so it is tied to the server's event loop.
-    """
-    logger.info("[R-05] Cleanup loop started — interval: %ds.", _INTERVAL_SECONDS)
+    """Long-running async background task — start with asyncio.create_task() in the lifespan."""
+    logger.info("Cleanup loop started — interval: %ds.", _INTERVAL_SECONDS)
     while True:
         await asyncio.sleep(_INTERVAL_SECONDS)
         try:
             await _run_deindex_pass()
         except Exception:
-            logger.exception("[R-05] Error during cleanup pass — will retry next cycle.")
+            logger.exception("Error during cleanup pass — will retry next cycle.")

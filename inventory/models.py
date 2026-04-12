@@ -10,27 +10,16 @@ class InventoryItem(Base):
 
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     retailer_id = Column(String, nullable=False, index=True)  # JWT sub
-
-    # ── Required fields (HTTP 400 if missing) ──────────────────────────────
     title = Column(String, nullable=False)
     category = Column(String, nullable=False)
     quantity = Column(Integer, nullable=False)
     price = Column(Float, nullable=False)
-    # condition: new | like_new | good | fair | poor
     condition = Column(String, nullable=False)
-    # expiry_date drives R-05 de-indexing
     expiry_date = Column(DateTime(timezone=True), nullable=False)
-
-    # ── Optional fields ────────────────────────────────────────────────────
     description = Column(Text, nullable=True)
     location = Column(String, nullable=True)
-
-    # ── Internal state ─────────────────────────────────────────────────────
-    # status: available | sold | expired
     status = Column(String, nullable=False, default="available")
-    # True once successfully upserted into ChromaDB
     embedded = Column(Boolean, nullable=False, default=False)
-
     created_at = Column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),

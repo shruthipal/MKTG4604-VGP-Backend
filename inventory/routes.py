@@ -47,13 +47,6 @@ async def upload_inventory(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(require_retailer_role),
 ):
-    """
-    Validates all required inventory fields (HTTP 400 on any null/invalid value),
-    persists to SQLite, then embeds + upserts to ChromaDB.
-
-    R-03: ChromaDB call is capped at 1.5 s. On timeout the item is saved to DB
-    with embedded=False and will be indexed on the next R-05 cleanup pass.
-    """
     item = InventoryItem(
         retailer_id=current_user["sub"],
         title=body.title,
@@ -106,26 +99,11 @@ async def bulk_upload_inventory(
     current_user: dict = Depends(require_retailer_role),
 ):
     """
-    Accepts a CSV (.csv) or Excel (.xlsx / .xls) file. Each data row is validated
-    against the same rules as the single upload endpoint and processed through the
-    same pipeline (SQLite store → ChromaDB embed).
-
-    Processing guarantees
-    ─────────────────────
-    • Rows are validated independently — a failure on row 5 does not block rows 6+.
-    • All valid rows are DB-inserted first, then embedded to ChromaDB in parallel.
-    • ChromaDB embeds that exceed the 1.5 s R-03 timeout leave the item with
-      embedded=False; the hourly R-05 sweep will pick them up.
-
-    Returns
-    ───────
-    BulkUploadResponse with:
-      successful        — rows stored to DB
-      failed            — rows that did not pass validation
-      uploaded_item_ids — IDs of created InventoryItems
-      errors            — per-row error detail (row number, raw data, messages)
+    Accepts CSV (.csv) or Excel (.xlsx/.xls). Rows are validated independently —
+    a failure on one row does not block others. Returns BulkUploadResponse with
+    counts and per-row error detail.
     """
-    # ── 1. Read + parse file ───────────────────────────────────────────────
+    # 1. Parse file
     filename = file.filename or "upload"
     content = await file.read()
 
@@ -140,7 +118,7 @@ async def bulk_upload_inventory(
             detail="The uploaded file contains no data rows.",
         )
 
-    # ── 2. Validate every row — collect valid items and errors ─────────────
+    # 2. Validate rows
     valid: list[tuple[int, dict, InventoryUploadRequest]] = []  # (row_num, raw, parsed)
     row_errors: list[RowError] = []
 
@@ -157,7 +135,7 @@ async def bulk_upload_inventory(
             ]
             row_errors.append(RowError(row=row_num, raw_data=raw, errors=messages))
 
-    # ── 3. DB insert — all valid rows ──────────────────────────────────────
+    # 3. Insert to DB
     inserted: list[InventoryItem] = []
 
     for _row_num, _raw, parsed in valid:
@@ -180,7 +158,7 @@ async def bulk_upload_inventory(
         for item in inserted:
             await db.refresh(item)
 
-    # ── 4. ChromaDB embed — all inserted items in parallel ────────────────
+    # 4. Embed to ChromaDB
     async def _embed_one(item: InventoryItem) -> bool:
         item_data = {
             "retailer_id": item.retailer_id,
@@ -284,10 +262,7 @@ async def update_item_status(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(require_retailer_role),
 ):
-    """
-    R-05 immediate path: when a retailer marks an item sold/expired, it is
-    removed from ChromaDB right away rather than waiting for the hourly sweep.
-    """
+    """Immediately de-indexes from ChromaDB when status changes to sold/expired."""
     item = await _get_owned_item(item_id, current_user["sub"], db)
 
     item.status = body.status.value
@@ -300,7 +275,7 @@ async def update_item_status(
         item.updated_at = datetime.now(timezone.utc)
         await db.commit()
         logger.info(
-            "[R-05] Immediate de-index: item %s marked '%s' by retailer %s.",
+            "De-indexed item %s (status: %s, retailer: %s).",
             item_id,
             body.status.value,
             current_user["sub"],
