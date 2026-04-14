@@ -58,6 +58,28 @@ async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
 
 
 @router.get(
+    "/login",
+    response_model=TokenResponse,
+    summary="Authenticate and receive a JWT (GET for testing)",
+)
+async def login_get(email: str, password: str, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(User).where(User.email == email))
+    user = result.scalar_one_or_none()
+
+    if not user or not bcrypt.checkpw(
+        password.encode(), user.hashed_password.encode()
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    token = create_access_token(user.id, user.email, user.role)
+    return TokenResponse(access_token=token, role=user.role)
+
+
+@router.get(
     "/me",
     response_model=MeResponse,
     summary="Return the authenticated user's profile from their JWT",
