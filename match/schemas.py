@@ -36,6 +36,24 @@ class MatchResponse(BaseModel):
     served_from_cache: bool
 
 
+# ── Business-facing (buyer demand search) ─────────────────────────────────────
+
+class BuyerInterestCard(BaseModel):
+    """One buyer/org interested in a given surplus item type — shown on business side."""
+    org_name: str
+    segment: str          # "nonprofit" | "reseller" | "smb"
+    location: Optional[str]
+    wants: str            # human-readable summary of what they want
+    preferences: list[str]
+    match_strength: str   # "Strong" | "Good" | "Moderate"
+
+
+class BuyerSearchResponse(BaseModel):
+    buyers: list[BuyerInterestCard]
+    total_found: int
+    query: str
+
+
 # ── Retailer-facing ────────────────────────────────────────────────────────────
 
 class RetailerAlertResponse(BaseModel):

@@ -13,10 +13,12 @@ Docs: http://localhost:8000/docs
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
 # ── Database tables ───────────────────────────────────────────────────────────
@@ -127,3 +129,17 @@ async def health():
         "services": ["auth", "inventory", "buyer", "match"],
         "cache_entries": result_cache.size(),
     }
+
+
+# ── Serve built frontend (run `npm run build` in MKTG4604-VGP-Frontend first) ──
+_DIST = Path(__file__).parent.parent / "MKTG4604-VGP-Frontend" / "dist"
+
+if _DIST.exists():
+    app.mount("/assets", StaticFiles(directory=str(_DIST / "assets")), name="assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def serve_spa(full_path: str):
+        file = _DIST / full_path
+        if file.exists() and file.is_file():
+            return FileResponse(str(file))
+        return FileResponse(str(_DIST / "index.html"))

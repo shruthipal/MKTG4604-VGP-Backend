@@ -33,15 +33,18 @@ from .database import get_db
 from .llm import generate_recommendation
 from .models import MatchResult, RetailerAlert
 from .ranker import RankedItem, rank_and_filter
-from .schemas import MatchResponse, RecommendationCard, RetailerAlertResponse
+from .schemas import (
+    BuyerInterestCard, BuyerSearchResponse,
+    MatchResponse, RecommendationCard, RetailerAlertResponse,
+)
 from .vector import query_inventory  # noqa: F401 — kept for warmup import side-effect
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/match", tags=["match"])
 
-_TOP_N = 5
-_CHROMADB_FETCH_N = 20  # fetch more than needed so ranker has room to filter
+_TOP_N = 40
+_CHROMADB_FETCH_N = 100  # fetch more than needed so ranker has room to filter
 
 
 # ── POST /match/recommendations ───────────────────────────────────────────────
@@ -87,14 +90,316 @@ async def get_recommendations(
     raw_kw = (notes_match.group(1) if notes_match else (prefs_match.group(1) if prefs_match else query_text)).strip()
     keyword = raw_kw.lower()
     logger.info("[match] keyword search: %r", keyword)
+    # Synonym expansion — map common user terms to inventory vocabulary
+    _SYNONYMS: dict[str, list[str]] = {
+        # ── Clothing (general) ────────────────────────────────────────────────
+        "clothes":      ["clothing", "apparel"],
+        "clothing":     ["clothing", "apparel"],
+        "apparel":      ["apparel", "clothing"],
+        "outfit":       ["clothing", "apparel", "outfit"],
+        "outfits":      ["clothing", "apparel"],
+        "uniform":      ["uniform", "workwear", "apparel"],
+        "uniforms":     ["uniform", "workwear", "apparel"],
+        "casual":       ["casual", "clothing", "apparel"],
+        "streetwear":   ["streetwear", "athletic", "casual", "clothing"],
+        "fashion":      ["fashion", "clothing", "apparel"],
+        # ── Tops ──────────────────────────────────────────────────────────────
+        "shirt":        ["shirt"],
+        "shirts":       ["shirt"],
+        "tee":          ["tee", "shirt", "graphic"],
+        "tshirt":       ["shirt", "tee"],
+        "tshirts":      ["shirt", "tee"],
+        "polo":         ["polo", "shirt"],
+        "polos":        ["polo", "shirt"],
+        "flannel":      ["flannel", "shirt"],
+        "blouse":       ["blouse", "shirt", "top"],
+        "blouses":      ["blouse", "shirt", "top"],
+        "top":          ["top", "shirt", "blouse"],
+        "tops":         ["top", "shirt", "blouse"],
+        "tank":         ["tank", "shirt", "athletic"],
+        # ── Bottoms ───────────────────────────────────────────────────────────
+        "pants":        ["pants", "jeans", "chino", "trouser"],
+        "jeans":        ["jeans", "denim"],
+        "denim":        ["denim", "jeans"],
+        "chinos":       ["chino", "pants", "trouser"],
+        "chino":        ["chino", "pants", "trouser"],
+        "trousers":     ["trouser", "pants", "chino"],
+        "shorts":       ["shorts", "athletic", "casual"],
+        "leggings":     ["legging", "athletic", "workout"],
+        "legging":      ["legging", "athletic", "workout"],
+        "joggers":      ["jogger", "sweat", "athletic", "pants"],
+        # ── Outerwear ─────────────────────────────────────────────────────────
+        "jacket":       ["jacket", "outerwear"],
+        "jackets":      ["jacket", "outerwear"],
+        "coat":         ["coat", "jacket", "outerwear"],
+        "coats":        ["coat", "jacket", "outerwear"],
+        "puffer":       ["puffer", "down", "jacket", "outerwear"],
+        "parka":        ["parka", "jacket", "outerwear", "winter"],
+        "fleece":       ["fleece", "jacket", "hoodie", "pullover"],
+        "vest":         ["vest", "outerwear", "jacket"],
+        "vests":        ["vest", "outerwear"],
+        "windbreaker":  ["windbreaker", "jacket", "rain", "outerwear"],
+        "raincoat":     ["rain", "jacket", "outerwear"],
+        "winter coat":  ["winter", "jacket", "outerwear", "parka"],
+        # ── Sweaters & Hoodies ────────────────────────────────────────────────
+        "hoodie":       ["hoodie", "fleece", "sweat"],
+        "hoodies":      ["hoodie", "fleece", "sweat"],
+        "sweatshirt":   ["sweat", "hoodie", "fleece", "crew"],
+        "sweatshirts":  ["sweat", "hoodie", "fleece"],
+        "sweater":      ["sweater", "knitwear", "pullover"],
+        "sweaters":     ["sweater", "knitwear", "pullover"],
+        "pullover":     ["pullover", "sweater", "fleece", "hoodie"],
+        "sweats":       ["sweat", "fleece", "hoodie", "jogger"],
+        "crewneck":     ["crew", "sweat", "hoodie", "sweater"],
+        # ── Athletic / Activewear ─────────────────────────────────────────────
+        "athletic":     ["athletic", "workout", "training", "sport"],
+        "workout":      ["workout", "athletic", "training", "fitness"],
+        "activewear":   ["athletic", "activewear", "workout", "training"],
+        "gym":          ["gym", "workout", "athletic", "training", "fitness"],
+        "running":      ["running", "athletic", "training", "footwear"],
+        "yoga":         ["yoga", "athletic", "legging", "activewear"],
+        "sports":       ["sport", "athletic", "training", "fitness"],
+        "sport":        ["sport", "athletic", "training"],
+        "compression":  ["compression", "athletic", "training"],
+        "training":     ["training", "athletic", "workout", "sport"],
+        "fitness":      ["fitness", "athletic", "workout", "training"],
+        # ── Footwear ──────────────────────────────────────────────────────────
+        "shoes":        ["shoes", "footwear", "boot", "sneaker"],
+        "shoe":         ["shoes", "footwear", "boot", "sneaker"],
+        "boots":        ["boot", "footwear"],
+        "boot":         ["boot", "footwear"],
+        "sneakers":     ["sneaker", "footwear", "athletic"],
+        "sneaker":      ["sneaker", "footwear", "athletic"],
+        "footwear":     ["footwear", "shoes", "boot", "sneaker"],
+        "heels":        ["heel", "footwear", "women"],
+        "sandals":      ["sandal", "footwear"],
+        "workboots":    ["work", "boot", "footwear", "carhartt"],
+        "hiking boots": ["hiking", "boot", "footwear", "outdoor"],
+        # ── Underwear & Basics ────────────────────────────────────────────────
+        "underwear":    ["underwear", "basics", "essential"],
+        "socks":        ["socks", "underwear", "basics"],
+        "thermal":      ["thermal", "underwear", "basics", "heattech"],
+        "undershirt":   ["undershirt", "shirt", "thermal", "basics"],
+        # ── Professional / Formal ─────────────────────────────────────────────
+        "dress":        ["dress", "formal", "business", "professional"],
+        "suit":         ["suit", "blazer", "formal", "dress"],
+        "blazer":       ["blazer", "suit", "formal", "jacket"],
+        "blazers":      ["blazer", "suit", "formal"],
+        "formal":       ["formal", "dress", "blazer", "suit"],
+        "business":     ["business", "dress", "formal", "professional"],
+        "professional": ["professional", "dress", "formal", "business"],
+        "workwear":     ["workwear", "work", "carhartt", "professional"],
+        # ── Outdoor / Adventure ───────────────────────────────────────────────
+        "outdoor":      ["outdoor", "hiking", "camping"],
+        "hiking":       ["hiking", "outdoor", "trail", "boot"],
+        "camping":      ["camping", "outdoor", "gear"],
+        "gear":         ["gear", "outdoor", "athletic", "equipment"],
+        # ── Gender ────────────────────────────────────────────────────────────
+        "men":          ["men", "men's", "male"],
+        "mens":         ["men", "men's", "male"],
+        "women":        ["women", "women's", "female"],
+        "womens":       ["women", "women's", "female"],
+        "unisex":       ["unisex", "men", "women"],
+        # ── Accessories ───────────────────────────────────────────────────────
+        "accessories":  ["accessories", "accessory", "jewelry", "handbag"],
+        "jewelry":      ["jewelry", "necklace", "earring", "accessories"],
+        "handbag":      ["handbag", "bag", "accessories"],
+        "sunglasses":   ["sunglasses", "accessories"],
+        # ── Makeup & Cosmetics ────────────────────────────────────────────────
+        "makeup":       ["makeup", "cosmetic", "beauty"],
+        "cosmetics":    ["cosmetic", "makeup", "beauty"],
+        "beauty":       ["beauty", "makeup", "cosmetic", "skincare"],
+        "foundation":   ["foundation", "makeup", "cosmetic"],
+        "concealer":    ["concealer", "foundation", "makeup"],
+        "lipstick":     ["lipstick", "lip", "makeup"],
+        "lip":          ["lip", "lipstick", "gloss", "makeup"],
+        "gloss":        ["gloss", "lip", "makeup"],
+        "mascara":      ["mascara", "eye", "makeup"],
+        "eyeliner":     ["eyeliner", "eye", "liner", "makeup"],
+        "eyeshadow":    ["eyeshadow", "eye", "palette", "makeup"],
+        "palette":      ["palette", "eyeshadow", "makeup"],
+        "palettes":     ["palette", "eyeshadow", "makeup"],
+        "blush":        ["blush", "cheek", "makeup"],
+        "bronzer":      ["bronzer", "blush", "cheek", "makeup"],
+        "highlighter":  ["highlighter", "glow", "makeup"],
+        "primer":       ["primer", "makeup", "skincare"],
+        "setting spray":["setting", "spray", "makeup"],
+        "brow":         ["brow", "eyebrow", "makeup"],
+        "nail":         ["nail", "polish", "beauty"],
+        "nails":        ["nail", "polish", "beauty"],
+        # ── Skincare ─────────────────────────────────────────────────────────
+        "skincare":     ["skincare", "skin", "moisturizer", "serum"],
+        "moisturizer":  ["moisturizer", "lotion", "skincare"],
+        "lotion":       ["lotion", "moisturizer", "skincare"],
+        "serum":        ["serum", "vitamin", "skincare"],
+        "cleanser":     ["cleanser", "face", "wash", "skincare"],
+        "face wash":    ["face", "cleanser", "wash", "skincare"],
+        "sunscreen":    ["sunscreen", "spf", "skincare"],
+        "toner":        ["toner", "skincare"],
+        "facial":       ["facial", "face", "skincare"],
+        # ── Men's Grooming ────────────────────────────────────────────────────
+        "grooming":     ["grooming", "shaving", "razor", "deodorant"],
+        "razor":        ["razor", "shaving", "grooming"],
+        "razors":       ["razor", "shaving", "grooming"],
+        "shaving":      ["shaving", "razor", "grooming"],
+        "shave":        ["shave", "razor", "shaving", "grooming"],
+        "deodorant":    ["deodorant", "antiperspirant", "grooming"],
+        "body wash":    ["body", "wash", "shower", "grooming"],
+        "shower gel":   ["shower", "gel", "body", "wash", "grooming"],
+        "shampoo":      ["shampoo", "hair", "grooming"],
+        "conditioner":  ["conditioner", "hair", "grooming"],
+        "hair":         ["hair", "shampoo", "conditioner", "styling"],
+        "pomade":       ["pomade", "styling", "hair", "grooming"],
+        "gel":          ["gel", "styling", "hair", "grooming"],
+        "hygiene":      ["hygiene", "grooming", "personal", "deodorant"],
+        "personal care":["personal", "grooming", "hygiene"],
+        # ── Food (general) ────────────────────────────────────────────────────
+        "food":         ["food", "beverage", "produce", "baked", "prepared"],
+        "meal":         ["meal", "prepared", "food"],
+        "meals":        ["meal", "prepared", "food"],
+        "lunch":        ["lunch", "prepared", "sandwich", "food"],
+        "dinner":       ["dinner", "prepared", "food"],
+        "breakfast":    ["breakfast", "baked", "pastry", "coffee", "bagel"],
+        "snack":        ["snack", "packaged", "food"],
+        "snacks":       ["snack", "packaged", "food"],
+        "catering":     ["catering", "prepared", "food"],
+        "restaurant":   ["restaurant", "prepared", "food"],
+        # ── Baked Goods ───────────────────────────────────────────────────────
+        "pastry":       ["pastry", "baked", "bakery"],
+        "pastries":     ["pastry", "baked", "bakery"],
+        "bakery":       ["bakery", "baked", "bread", "pastry"],
+        "baked":        ["baked", "bakery", "bread", "pastry"],
+        "bread":        ["bread", "baked", "loaf", "bakery"],
+        "loaf":         ["loaf", "bread", "baked"],
+        "donut":        ["donut", "pastry", "baked"],
+        "donuts":       ["donut", "pastry", "baked"],
+        "doughnut":     ["donut", "pastry", "baked"],
+        "muffin":       ["muffin", "pastry", "baked"],
+        "muffins":      ["muffin", "pastry", "baked"],
+        "croissant":    ["croissant", "pastry", "baked"],
+        "croissants":   ["croissant", "pastry", "baked"],
+        "bagel":        ["bagel", "baked", "bakery"],
+        "bagels":       ["bagel", "baked", "bakery"],
+        "cookie":       ["cookie", "baked", "pastry"],
+        "cookies":      ["cookie", "baked", "pastry"],
+        "cake":         ["cake", "baked", "dessert"],
+        "dessert":      ["dessert", "baked", "cake", "pastry"],
+        "desserts":     ["dessert", "baked", "cake"],
+        # ── Produce & Fresh ───────────────────────────────────────────────────
+        "produce":      ["produce", "vegetable", "fruit", "organic"],
+        "vegetables":   ["vegetable", "produce", "organic"],
+        "vegetable":    ["vegetable", "produce", "organic"],
+        "veggies":      ["vegetable", "produce", "organic"],
+        "veggie":       ["vegetable", "produce", "organic"],
+        "fruits":       ["fruit", "produce", "organic"],
+        "fruit":        ["fruit", "produce", "organic"],
+        "organic":      ["organic", "produce", "natural"],
+        "fresh":        ["fresh", "produce", "food"],
+        "greens":       ["greens", "produce", "vegetable", "salad"],
+        "salad":        ["salad", "prepared", "produce", "greens"],
+        "salads":       ["salad", "prepared", "produce"],
+        # ── Canned / Packaged ─────────────────────────────────────────────────
+        "canned":       ["canned", "beans", "soup", "pantry"],
+        "beans":        ["beans", "canned", "legume", "protein"],
+        "soup":         ["soup", "canned", "prepared"],
+        "soups":        ["soup", "canned", "prepared"],
+        "pantry":       ["pantry", "canned", "packaged", "bulk"],
+        "groceries":    ["groceries", "packaged", "canned", "food"],
+        "grocery":      ["grocery", "packaged", "canned", "food"],
+        "packaged":     ["packaged", "groceries", "canned"],
+        "grains":       ["grain", "bulk", "rice", "quinoa"],
+        "grain":        ["grain", "bulk", "rice", "oat"],
+        "rice":         ["rice", "grain", "bulk"],
+        "oats":         ["oat", "grain", "bulk", "breakfast"],
+        "lentils":      ["lentil", "grain", "bulk", "beans"],
+        "quinoa":       ["quinoa", "grain", "bulk"],
+        # ── Prepared Foods ────────────────────────────────────────────────────
+        "prepared":     ["prepared", "food", "meal"],
+        "sandwich":     ["sandwich", "prepared", "wrap"],
+        "sandwiches":   ["sandwich", "prepared", "wrap"],
+        "wrap":         ["wrap", "sandwich", "prepared"],
+        "wraps":        ["wrap", "sandwich", "prepared"],
+        "bowl":         ["bowl", "prepared", "grain"],
+        "bowls":        ["bowl", "prepared", "grain"],
+        "burrito":      ["burrito", "prepared", "mexican"],
+        "burritos":     ["burrito", "prepared"],
+        "pizza":        ["pizza", "prepared", "food"],
+        "chicken":      ["chicken", "prepared", "protein"],
+        "protein":      ["protein", "chicken", "prepared"],
+        "deli":         ["deli", "prepared", "sandwich"],
+        "sushi":        ["sushi", "prepared", "food"],
+        "pasta":        ["pasta", "prepared", "italian"],
+        "sauce":        ["sauce", "pasta", "prepared"],
+        "sauces":       ["sauce", "pasta", "prepared"],
+        # ── Dairy ─────────────────────────────────────────────────────────────
+        "dairy":        ["dairy", "cheese", "milk"],
+        "cheese":       ["cheese", "dairy"],
+        "milk":         ["milk", "dairy"],
+        # ── Beverages ─────────────────────────────────────────────────────────
+        "coffee":       ["coffee", "beverage"],
+        "beverage":     ["beverage", "coffee", "drink"],
+        "beverages":    ["beverage", "coffee", "drink"],
+        "drink":        ["drink", "beverage", "coffee"],
+        "drinks":       ["drink", "beverage", "coffee"],
+        "tea":          ["tea", "beverage", "drink"],
+        "juice":        ["juice", "beverage", "drink"],
+        "cold brew":    ["cold", "brew", "coffee", "beverage"],
+        "latte":        ["latte", "coffee", "beverage"],
+        # ── Home Goods ────────────────────────────────────────────────────────
+        "home":         ["home", "household", "goods", "kitchen"],
+        "household":    ["household", "home", "goods"],
+        "kitchen":      ["kitchen", "cookware", "bakeware", "tableware"],
+        "cookware":     ["cookware", "pots", "pans", "kitchen"],
+        "bedding":      ["bedding", "sheets", "towel", "linen"],
+        "towels":       ["towel", "bath", "bedding"],
+        "towel":        ["towel", "bath", "bedding"],
+        "linens":       ["linen", "bedding", "towel"],
+        "decor":        ["decor", "accessories", "home"],
+        "furniture":    ["furniture", "home", "goods"],
+        "dishes":       ["dishes", "tableware", "kitchen"],
+        "tableware":    ["tableware", "dishes", "kitchen"],
+        # ── Electronics / Office ──────────────────────────────────────────────
+        "headphones":   ["headphone", "audio", "electronics"],
+        "tech":         ["tech", "electronics", "gadget"],
+        "electronics":  ["electronics", "tech", "gadget"],
+        "office":       ["office", "supplies", "staples"],
+        "supplies":     ["supplies", "office", "stationery"],
+    }
+    # Split into individual meaningful words, then expand with synonyms
+    raw_words = [w.strip("'\".,!?()-") for w in keyword.split() if len(w.strip("'\".,!?()-")) > 2]
+    if not raw_words:
+        raw_words = [keyword]
+    expanded: list[str] = []
+    for w in raw_words:
+        expanded.extend(_SYNONYMS.get(w, [w]))
+    # Deduplicate while preserving order
+    seen: set[str] = set()
+    words: list[str] = []
+    for w in expanded:
+        if w not in seen:
+            seen.add(w)
+            words.append(w)
+    where_conditions = " OR ".join(
+        f"(LOWER(title) LIKE :w{i} OR LOWER(category) LIKE :w{i} OR LOWER(description) LIKE :w{i})"
+        for i in range(len(words))
+    )
+    title_conditions    = " OR ".join(f"LOWER(title)       LIKE :w{i}" for i in range(len(words)))
+    category_conditions = " OR ".join(f"LOWER(category)    LIKE :w{i}" for i in range(len(words)))
+    params = {f"w{i}": f"%{w}%" for i, w in enumerate(words)}
     kw_result = await db.execute(
         text(
-            "SELECT * FROM inventory_items "
-            "WHERE status = 'available' "
-            "AND (LOWER(title) LIKE :kw OR LOWER(category) LIKE :kw OR LOWER(description) LIKE :kw) "
-            "LIMIT 20"
+            f"SELECT DISTINCT *, "
+            f"  CASE "
+            f"    WHEN ({title_conditions})    THEN 0.85 "
+            f"    WHEN ({category_conditions}) THEN 0.70 "
+            f"    ELSE 0.50 "
+            f"  END AS relevance_score "
+            f"FROM inventory_items "
+            f"WHERE status = 'available' "
+            f"AND ({where_conditions}) "
+            f"LIMIT 100"
         ),
-        {"kw": f"%{keyword}%"},
+        params,
     )
     kw_rows = kw_result.fetchall()
     if not kw_rows:
@@ -106,7 +411,8 @@ async def get_recommendations(
             served_from_cache=False,
         )
     ids: list[str] = [row.id for row in kw_rows]
-    distances: list[float] = [0.5] * len(ids)  # neutral similarity for keyword matches
+    # Convert relevance_score (similarity) → distance so ranker can convert back
+    distances: list[float] = [1.0 - float(row.relevance_score) for row in kw_rows]
 
     # Step 4: Load inventory details
     inventory = await _load_inventory_items(ids, db)
@@ -170,6 +476,208 @@ async def get_recommendations(
         generated_at=datetime.now(timezone.utc),
         served_from_cache=False,
     )
+
+
+# ── POST /match/buyers/search ─────────────────────────────────────────────────
+
+@router.post(
+    "/buyers/search",
+    response_model=BuyerSearchResponse,
+    summary="Find buyer orgs & nonprofits interested in a given surplus item type (business side)",
+)
+async def search_interested_buyers(
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(require_buyer_role),
+):
+    """
+    Searches buyer_profiles by notes + preferences using the same synonym expansion
+    as the recommendation pipeline. Returns matching buyer orgs for the business side
+    so retailers can see who actually wants their surplus.
+    """
+    import re as _re
+    import json as _json
+
+    query = str(body.get("query", "")).strip().lower()
+    if not query:
+        return BuyerSearchResponse(buyers=[], total_found=0, query=query)
+
+    # Reuse the synonym expansion dict inline
+    _SYNONYMS: dict[str, list[str]] = {
+        "clothes": ["clothing", "apparel"], "clothing": ["clothing", "apparel"],
+        "apparel": ["apparel", "clothing"], "outfit": ["clothing", "apparel"],
+        "shirt": ["shirt"], "shirts": ["shirt"], "tee": ["tee", "shirt"],
+        "polo": ["polo", "shirt"], "tops": ["top", "shirt", "blouse"],
+        "pants": ["pants", "jeans", "chino", "trouser"], "jeans": ["jeans", "denim"],
+        "denim": ["denim", "jeans"], "chinos": ["chino", "pants"],
+        "shorts": ["shorts", "athletic", "casual"],
+        "leggings": ["legging", "athletic", "workout"],
+        "joggers": ["jogger", "sweat", "athletic"],
+        "jacket": ["jacket", "outerwear"], "jackets": ["jacket", "outerwear"],
+        "coat": ["coat", "jacket", "outerwear"], "puffer": ["puffer", "down", "jacket"],
+        "fleece": ["fleece", "jacket", "hoodie"], "vest": ["vest", "outerwear"],
+        "windbreaker": ["windbreaker", "jacket", "outerwear"],
+        "hoodie": ["hoodie", "fleece", "sweat"], "hoodies": ["hoodie", "fleece", "sweat"],
+        "sweatshirt": ["sweat", "hoodie", "fleece"],
+        "sweater": ["sweater", "knitwear", "pullover"],
+        "pullover": ["pullover", "sweater", "fleece"],
+        "sweats": ["sweat", "fleece", "hoodie", "jogger"],
+        "athletic": ["athletic", "workout", "training", "sport"],
+        "workout": ["workout", "athletic", "training", "fitness"],
+        "activewear": ["athletic", "activewear", "workout"],
+        "gym": ["gym", "workout", "athletic", "training", "fitness"],
+        "running": ["running", "athletic", "training", "footwear"],
+        "yoga": ["yoga", "athletic", "legging"],
+        "sports": ["sport", "athletic", "training", "fitness"],
+        "training": ["training", "athletic", "workout", "sport"],
+        "fitness": ["fitness", "athletic", "workout"],
+        "shoes": ["shoes", "footwear", "boot", "sneaker"],
+        "boots": ["boot", "footwear"], "sneakers": ["sneaker", "footwear", "athletic"],
+        "footwear": ["footwear", "shoes", "boot", "sneaker"],
+        "workboots": ["work", "boot", "footwear"],
+        "underwear": ["underwear", "basics", "essential"],
+        "socks": ["socks", "underwear", "basics"],
+        "thermal": ["thermal", "underwear", "basics"],
+        "dress": ["dress", "formal", "business", "professional"],
+        "suit": ["suit", "blazer", "formal", "dress"],
+        "blazer": ["blazer", "suit", "formal", "jacket"],
+        "formal": ["formal", "dress", "blazer", "suit"],
+        "business": ["business", "dress", "formal", "professional"],
+        "professional": ["professional", "dress", "formal", "business"],
+        "workwear": ["workwear", "work", "professional"],
+        "outdoor": ["outdoor", "hiking", "camping"],
+        "hiking": ["hiking", "outdoor", "trail", "boot"],
+        "gear": ["gear", "outdoor", "athletic", "equipment"],
+        "men": ["men", "men's", "male", "grooming"],
+        "mens": ["men", "men's", "male"],
+        "women": ["women", "women's", "female"],
+        "womens": ["women", "women's", "female"],
+        "accessories": ["accessories", "accessory", "jewelry"],
+        "makeup": ["makeup", "cosmetic", "beauty"],
+        "cosmetics": ["cosmetic", "makeup", "beauty"],
+        "beauty": ["beauty", "makeup", "cosmetic", "skincare"],
+        "skincare": ["skincare", "skin", "moisturizer", "serum"],
+        "grooming": ["grooming", "shaving", "razor", "deodorant"],
+        "razor": ["razor", "shaving", "grooming"],
+        "deodorant": ["deodorant", "antiperspirant", "grooming"],
+        "shampoo": ["shampoo", "hair", "grooming"],
+        "hair": ["hair", "shampoo", "conditioner", "styling"],
+        "hygiene": ["hygiene", "grooming", "personal", "deodorant"],
+        "food": ["food", "beverage", "produce", "baked", "prepared"],
+        "meal": ["meal", "prepared", "food"], "meals": ["meal", "prepared", "food"],
+        "breakfast": ["breakfast", "baked", "pastry", "coffee", "bagel"],
+        "snack": ["snack", "packaged", "food"], "snacks": ["snack", "packaged", "food"],
+        "pastry": ["pastry", "baked", "bakery"], "pastries": ["pastry", "baked", "bakery"],
+        "bakery": ["bakery", "baked", "bread", "pastry"],
+        "bread": ["bread", "baked", "loaf", "bakery"],
+        "donut": ["donut", "pastry", "baked"], "donuts": ["donut", "pastry", "baked"],
+        "bagel": ["bagel", "baked", "bakery"], "bagels": ["bagel", "baked", "bakery"],
+        "cookie": ["cookie", "baked", "pastry"], "cookies": ["cookie", "baked", "pastry"],
+        "dessert": ["dessert", "baked", "cake", "pastry"],
+        "produce": ["produce", "vegetable", "fruit", "organic"],
+        "vegetables": ["vegetable", "produce", "organic"],
+        "veggies": ["vegetable", "produce", "organic"],
+        "fruits": ["fruit", "produce", "organic"],
+        "organic": ["organic", "produce", "natural"],
+        "fresh": ["fresh", "produce", "food"],
+        "greens": ["greens", "produce", "vegetable", "salad"],
+        "salad": ["salad", "prepared", "produce"],
+        "canned": ["canned", "beans", "soup", "pantry"],
+        "beans": ["beans", "canned", "legume"],
+        "soup": ["soup", "canned", "prepared"],
+        "pantry": ["pantry", "canned", "packaged", "bulk"],
+        "groceries": ["groceries", "packaged", "canned", "food"],
+        "grocery": ["grocery", "packaged", "canned", "food"],
+        "grains": ["grain", "bulk", "rice", "quinoa"],
+        "sandwich": ["sandwich", "prepared", "wrap"],
+        "wrap": ["wrap", "sandwich", "prepared"],
+        "bowl": ["bowl", "prepared", "grain"],
+        "burrito": ["burrito", "prepared"],
+        "pasta": ["pasta", "prepared"],
+        "dairy": ["dairy", "cheese", "milk"],
+        "cheese": ["cheese", "dairy"],
+        "coffee": ["coffee", "beverage"],
+        "beverage": ["beverage", "coffee", "drink"],
+        "beverages": ["beverage", "coffee", "drink"],
+        "drink": ["drink", "beverage", "coffee"],
+        "tea": ["tea", "beverage", "drink"],
+        "home": ["home", "household", "goods", "kitchen"],
+        "kitchen": ["kitchen", "cookware", "tableware"],
+        "bedding": ["bedding", "sheets", "towel", "linen"],
+        "towels": ["towel", "bath", "bedding"],
+        "office": ["office", "supplies"],
+        "electronics": ["electronics", "tech"],
+    }
+
+    raw_words = [w.strip("'\".,!?()-") for w in query.split() if len(w.strip("'\".,!?()-")) > 2]
+    if not raw_words:
+        raw_words = [query]
+    expanded: list[str] = []
+    seen_exp: set[str] = set()
+    for w in raw_words:
+        for term in _SYNONYMS.get(w, [w]):
+            if term not in seen_exp:
+                seen_exp.add(term)
+                expanded.append(term)
+
+    # Search buyer_profiles — match on notes OR preferences (stored as JSON text)
+    conditions = " OR ".join(
+        f"(LOWER(bp.notes) LIKE :w{i} OR LOWER(bp.preferences) LIKE :w{i})"
+        for i in range(len(expanded))
+    )
+    params = {f"w{i}": f"%{t}%" for i, t in enumerate(expanded)}
+
+    result = await db.execute(
+        text(f"""
+            SELECT bp.org_name, bp.segment, bp.location, bp.notes, bp.preferences
+            FROM   buyer_profiles bp
+            WHERE  bp.org_name != ''
+              AND  ({conditions})
+            ORDER  BY bp.segment ASC
+            LIMIT  40
+        """),
+        params,
+    )
+    rows = result.fetchall()
+
+    cards: list[BuyerInterestCard] = []
+    seen_orgs: set[str] = set()
+    for row in rows:
+        if row.org_name in seen_orgs:
+            continue
+        seen_orgs.add(row.org_name)
+
+        # Parse preferences (stored as JSON list or comma string)
+        prefs: list[str] = []
+        if row.preferences:
+            try:
+                prefs = _json.loads(row.preferences) if isinstance(row.preferences, str) else list(row.preferences)
+            except Exception:
+                prefs = [p.strip() for p in str(row.preferences).split(",")]
+
+        # Truncate notes to a readable wants summary
+        notes_text = (row.notes or "").strip()
+        wants = notes_text[:160].rsplit(" ", 1)[0] + "…" if len(notes_text) > 160 else notes_text
+
+        # Score based on how many expanded terms hit preferences
+        prefs_lower = " ".join(prefs).lower()
+        hits = sum(1 for t in expanded if t in prefs_lower)
+        strength = "Strong" if hits >= 2 else "Good" if hits >= 1 else "Moderate"
+
+        cards.append(BuyerInterestCard(
+            org_name=row.org_name,
+            segment=row.segment,
+            location=row.location,
+            wants=wants,
+            preferences=prefs[:6],  # cap display to 6
+            match_strength=strength,
+        ))
+
+    # Sort: Strong first, then Good, then Moderate
+    order = {"Strong": 0, "Good": 1, "Moderate": 2}
+    cards.sort(key=lambda c: order[c.match_strength])
+
+    return BuyerSearchResponse(buyers=cards, total_found=len(cards), query=query)
 
 
 # ── GET /match/alerts ─────────────────────────────────────────────────────────
