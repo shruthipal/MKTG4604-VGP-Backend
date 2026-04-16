@@ -27,7 +27,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth.jwt_utils import require_buyer_role, require_retailer_role
+from auth.jwt_utils import get_current_user, require_buyer_role, require_retailer_role
 from . import cache as result_cache
 from .database import get_db
 from .llm import generate_recommendation
@@ -37,7 +37,7 @@ from .schemas import (
     BuyerInterestCard, BuyerSearchResponse,
     MatchResponse, RecommendationCard, RetailerAlertResponse,
 )
-from .vector import query_inventory  # noqa: F401 — kept for warmup import side-effect
+from .vector import query_inventory
 
 logger = logging.getLogger(__name__)
 
@@ -83,14 +83,62 @@ async def get_recommendations(
             served_from_cache=True,
         )
 
-    # Step 3: Keyword search (SQLite LIKE)
+    # Step 3: Semantic vector search (ChromaDB)
     import re as _re
     notes_match = _re.search(r'Notes:\s*(.+)', query_text, _re.IGNORECASE)
     prefs_match = _re.search(r'Category preferences:\s*(.+)', query_text, _re.IGNORECASE)
-    raw_kw = (notes_match.group(1) if notes_match else (prefs_match.group(1) if prefs_match else query_text)).strip()
-    keyword = raw_kw.lower()
-    logger.info("[match] keyword search: %r", keyword)
-    # Synonym expansion — map common user terms to inventory vocabulary
+    notes_text = notes_match.group(1).strip() if notes_match else ""
+    prefs_text = prefs_match.group(1).strip() if prefs_match else ""
+    semantic_query = f"{notes_text} {prefs_text}".strip() or query_text
+    logger.info("[match] semantic vector search: %r", semantic_query[:120])
+
+    vector_result = await query_inventory(semantic_query, n_results=_CHROMADB_FETCH_N)
+    ids: list[str] = vector_result["ids"][0] if vector_result.get("ids") and vector_result["ids"] else []
+    distances: list[float] = vector_result["distances"][0] if vector_result.get("distances") and vector_result["distances"] else []
+
+    # Step 3b: SQLite keyword fallback if ChromaDB is empty or not yet indexed
+    if not ids:
+        logger.warning("[match] ChromaDB returned no results — falling back to keyword search")
+        keyword = semantic_query.lower()
+        raw_words = [w.strip("'\".,!?()-") for w in keyword.split() if len(w.strip("'\".,!?()-")) > 2]
+        if not raw_words:
+            raw_words = [keyword]
+        where_conditions = " OR ".join(
+            f"(LOWER(title) LIKE :w{i} OR LOWER(category) LIKE :w{i} OR LOWER(description) LIKE :w{i})"
+            for i in range(len(raw_words))
+        )
+        title_conditions    = " OR ".join(f"LOWER(title)    LIKE :w{i}" for i in range(len(raw_words)))
+        category_conditions = " OR ".join(f"LOWER(category) LIKE :w{i}" for i in range(len(raw_words)))
+        params = {f"w{i}": f"%{w}%" for i, w in enumerate(raw_words)}
+        fb_result = await db.execute(
+            text(
+                f"SELECT DISTINCT *, "
+                f"  CASE "
+                f"    WHEN ({title_conditions})    THEN 0.85 "
+                f"    WHEN ({category_conditions}) THEN 0.70 "
+                f"    ELSE 0.50 "
+                f"  END AS relevance_score "
+                f"FROM inventory_items "
+                f"WHERE status = 'available' "
+                f"AND ({where_conditions}) "
+                f"LIMIT 100"
+            ),
+            params,
+        )
+        fb_rows = fb_result.fetchall()
+        ids = [row.id for row in fb_rows]
+        distances = [1.0 - float(row.relevance_score) for row in fb_rows]
+
+    if not ids:
+        return MatchResponse(
+            recommendations=[],
+            buyer_segment=segment,
+            total_found=0,
+            generated_at=datetime.now(timezone.utc),
+            served_from_cache=False,
+        )
+
+    # ── (synonym dict kept only for buyers/search endpoint below) ─────────────
     _SYNONYMS: dict[str, list[str]] = {
         # ── Clothing (general) ────────────────────────────────────────────────
         "clothes":      ["clothing", "apparel"],
@@ -365,54 +413,6 @@ async def get_recommendations(
         "office":       ["office", "supplies", "staples"],
         "supplies":     ["supplies", "office", "stationery"],
     }
-    # Split into individual meaningful words, then expand with synonyms
-    raw_words = [w.strip("'\".,!?()-") for w in keyword.split() if len(w.strip("'\".,!?()-")) > 2]
-    if not raw_words:
-        raw_words = [keyword]
-    expanded: list[str] = []
-    for w in raw_words:
-        expanded.extend(_SYNONYMS.get(w, [w]))
-    # Deduplicate while preserving order
-    seen: set[str] = set()
-    words: list[str] = []
-    for w in expanded:
-        if w not in seen:
-            seen.add(w)
-            words.append(w)
-    where_conditions = " OR ".join(
-        f"(LOWER(title) LIKE :w{i} OR LOWER(category) LIKE :w{i} OR LOWER(description) LIKE :w{i})"
-        for i in range(len(words))
-    )
-    title_conditions    = " OR ".join(f"LOWER(title)       LIKE :w{i}" for i in range(len(words)))
-    category_conditions = " OR ".join(f"LOWER(category)    LIKE :w{i}" for i in range(len(words)))
-    params = {f"w{i}": f"%{w}%" for i, w in enumerate(words)}
-    kw_result = await db.execute(
-        text(
-            f"SELECT DISTINCT *, "
-            f"  CASE "
-            f"    WHEN ({title_conditions})    THEN 0.85 "
-            f"    WHEN ({category_conditions}) THEN 0.70 "
-            f"    ELSE 0.50 "
-            f"  END AS relevance_score "
-            f"FROM inventory_items "
-            f"WHERE status = 'available' "
-            f"AND ({where_conditions}) "
-            f"LIMIT 100"
-        ),
-        params,
-    )
-    kw_rows = kw_result.fetchall()
-    if not kw_rows:
-        return MatchResponse(
-            recommendations=[],
-            buyer_segment=segment,
-            total_found=0,
-            generated_at=datetime.now(timezone.utc),
-            served_from_cache=False,
-        )
-    ids: list[str] = [row.id for row in kw_rows]
-    # Convert relevance_score (similarity) → distance so ranker can convert back
-    distances: list[float] = [1.0 - float(row.relevance_score) for row in kw_rows]
 
     # Step 4: Load inventory details
     inventory = await _load_inventory_items(ids, db)
@@ -439,6 +439,18 @@ async def get_recommendations(
         for r in top
     ])
 
+    # Step 8b: Fetch retailer emails in one query so contact info is available
+    retailer_ids = list({r.item_data.get("retailer_id", "") for r in top} - {""})
+    retailer_email_map: dict[str, str] = {}
+    if retailer_ids:
+        placeholders = ", ".join(f":rid_{i}" for i in range(len(retailer_ids)))
+        params = {f"rid_{i}": rid for i, rid in enumerate(retailer_ids)}
+        email_rows = await db.execute(
+            text(f"SELECT id, email FROM users WHERE id IN ({placeholders})"),
+            params,
+        )
+        retailer_email_map = {row.id: row.email for row in email_rows.fetchall()}
+
     # Step 9a: Build cards
     cards: list[RecommendationCard] = [
         RecommendationCard(
@@ -452,6 +464,8 @@ async def get_recommendations(
             similarity_score=round(r.similarity_score, 4),
             composite_score=round(r.composite_score, 4),
             recommendation_text=rec_text,
+            retailer_email=retailer_email_map.get(r.item_data.get("retailer_id", ""), ""),
+            retailer_name="",
         )
         for r, rec_text in zip(top, rec_texts)
     ]
@@ -629,8 +643,10 @@ async def search_interested_buyers(
 
     result = await db.execute(
         text(f"""
-            SELECT bp.org_name, bp.segment, bp.location, bp.notes, bp.preferences
+            SELECT bp.org_name, bp.segment, bp.location, bp.notes, bp.preferences,
+                   bp.user_id, u.email AS contact_email
             FROM   buyer_profiles bp
+            LEFT JOIN users u ON u.id = bp.user_id
             WHERE  bp.org_name != ''
               AND  ({conditions})
             ORDER  BY bp.segment ASC
@@ -671,6 +687,8 @@ async def search_interested_buyers(
             wants=wants,
             preferences=prefs[:6],  # cap display to 6
             match_strength=strength,
+            contact_email=row.contact_email or "",
+            user_id=str(row.user_id) if row.user_id else "",
         ))
 
     # Sort: Strong first, then Good, then Moderate
@@ -767,6 +785,75 @@ async def mark_alert_read(
         is_read=True,
         created_at=row.created_at,
     )
+
+
+# ── POST /match/interest ──────────────────────────────────────────────────────
+
+@router.post("/interest", summary="Express interest in a match")
+async def express_interest(
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    import uuid as _uuid
+    interest_id = str(_uuid.uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+    await db.execute(
+        text("""INSERT INTO interests
+            (id, from_user_id, from_email, from_org_name, from_role,
+             target_type, target_id, target_title, target_owner_id, message, is_read, created_at)
+            VALUES (:id, :from_user_id, :from_email, :from_org_name, :from_role,
+             :target_type, :target_id, :target_title, :target_owner_id, :message, 0, :created_at)"""),
+        {
+            "id": interest_id,
+            "from_user_id": current_user["sub"],
+            "from_email": current_user["email"],
+            "from_org_name": body.get("from_org_name", ""),
+            "from_role": current_user["role"],
+            "target_type": body.get("target_type", "item"),
+            "target_id": body.get("target_id", ""),
+            "target_title": body.get("target_title", ""),
+            "target_owner_id": body.get("target_owner_id", ""),
+            "message": body.get("message", ""),
+            "created_at": now,
+        }
+    )
+    await db.commit()
+    return {"id": interest_id, "status": "sent"}
+
+
+# ── GET /match/inbox ───────────────────────────────────────────────────────────
+
+@router.get("/inbox", summary="Get interest inbox")
+async def get_inbox(
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    user_id = current_user["sub"]
+    result = await db.execute(
+        text("""SELECT * FROM interests
+            WHERE target_owner_id = :uid OR from_user_id = :uid
+            ORDER BY created_at DESC LIMIT 50"""),
+        {"uid": user_id}
+    )
+    rows = result.fetchall()
+    return [dict(r._mapping) for r in rows]
+
+
+# ── PATCH /match/inbox/{interest_id}/read ─────────────────────────────────────
+
+@router.patch("/inbox/{interest_id}/read", summary="Mark interest as read")
+async def mark_interest_read(
+    interest_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    await db.execute(
+        text("UPDATE interests SET is_read = 1 WHERE id = :iid AND target_owner_id = :uid"),
+        {"iid": interest_id, "uid": current_user["sub"]}
+    )
+    await db.commit()
+    return {"status": "ok"}
 
 
 # ── Private helpers ────────────────────────────────────────────────────────────

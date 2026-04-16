@@ -25,6 +25,8 @@ class RecommendationCard(BaseModel):
     similarity_score: float
     composite_score: float
     recommendation_text: str
+    retailer_email: str = ""
+    retailer_name: str = ""
 
 
 class MatchResponse(BaseModel):
@@ -46,6 +48,8 @@ class BuyerInterestCard(BaseModel):
     wants: str            # human-readable summary of what they want
     preferences: list[str]
     match_strength: str   # "Strong" | "Good" | "Moderate"
+    contact_email: str = ""
+    user_id: str = ""     # buyer's user id — used as target_owner_id for interest messages
 
 
 class BuyerSearchResponse(BaseModel):
